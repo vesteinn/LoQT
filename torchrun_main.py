@@ -113,6 +113,8 @@ def parse_args(args):
                         help="Unfuse MoE expert 3D Parameters into individual nn.Linear layers for LoQT wrapping")
     parser.add_argument("--quantize_frozen_experts", default=False, type=lambda x: x.lower() == "true",
                         help="Quantize MoE expert weights to NF4 (frozen, not trained) for memory savings")
+    parser.add_argument("--use_chat_template", default=False, type=lambda x: x.lower() == "true",
+                        help="Wrap raw text in the model's chat template to preserve instruction-following capabilities")
 
     # Quantization Parameters
     parser.add_argument("--quantize_w", type=str, default=None, choices=["1bit", "4bit", "8bit"])
@@ -418,8 +420,16 @@ def main(args):
         tokenizer = AutoTokenizer.from_pretrained("t5-base", model_max_length=args.max_length)
 
     def preprocess_batched(batch):
+        texts = batch["text"]
+        if args.use_chat_template:
+            texts = [
+                tokenizer.apply_chat_template(
+                    [{"role": "assistant", "content": t}],
+                    tokenize=False, add_generation_prompt=False
+                ) for t in texts
+            ]
         batch = tokenizer(
-            batch["text"],
+            texts,
             max_length=args.max_length,
             truncation=True,
             padding="max_length",

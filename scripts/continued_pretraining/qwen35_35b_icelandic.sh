@@ -31,7 +31,7 @@ python3 -m torch.distributed.run --standalone --nproc_per_node 1 --master_port 2
     --num_training_steps 10000 \
     --warmup_steps 1000 \
     --eval_every 1000 \
-    --save_every 2000 \
+    --save_every 20 \
     --dtype bfloat16 \
     --optimizer adam8bit \
     --use_loqt True \
@@ -50,5 +50,6 @@ python3 -m torch.distributed.run --standalone --nproc_per_node 1 --master_port 2
     --save_dir checkpoints/qwen35_35b_icelandic \
     --name qwen35_35b_icelandic_loqt \
     --wandb_project icelandic-loqt \
+    --use_chat_template True \
     --is_icelandic_dataset True \
     --workers 0
