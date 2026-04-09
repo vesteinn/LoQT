@@ -17,7 +17,7 @@ export HF_TOKEN=$(python3 -c "from huggingface_hub import get_token; print(get_t
 export QUANTIZED_MODEL_PATH=/dtu/p1/vestsn/isft/quantized_model.pt
 mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$WANDB_CACHE_DIR"
 
-python3 -m torch.distributed.run --standalone --nproc_per_node 1 --master_port 29500 torchrun_main.py \
+PYTHONUNBUFFERED=1 python3 -m torch.distributed.run --standalone --nproc_per_node 1 --master_port 29500 torchrun_main.py \
     --model_name Qwen/Qwen3.5-35B-A3B \
     --dataset_name /dtu/p1/vestsn/isft/icelandic_data \
     --use_hf_model True \

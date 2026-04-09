@@ -10,11 +10,11 @@ export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-${HF_HOME}/datasets}
 export TMPDIR=${TMPDIR:-/tmp}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-python3 -m torch.distributed.run --standalone --nproc_per_node 1 --master_port 29500 torchrun_main.py \
+PYTHONUNBUFFERED=1 python3 -m torch.distributed.run --standalone --nproc_per_node 1 --master_port 29500 torchrun_main.py \
     --model_name Qwen/Qwen3.5-4B \
     --dataset_name /dtu/p1/vestsn/isft/icelandic_data \
     --use_hf_model True \
-    --lr 0.001 \
+    --lr 0.0005 \
     --rank 128 \
     --lora_alpha 0.5 \
     --update_proj_gap 100 \

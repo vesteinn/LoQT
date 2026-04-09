@@ -234,17 +234,31 @@ def quantize_frozen_experts(model):
         down_qdata = []
         down_qstates = []
 
+        # Use GPU for quantization if available (CPU bnb backend is ~100x slower)
+        quant_device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
         with torch.no_grad():
             for i in range(num_experts):
-                qw, qs = bnb_F.quantize_4bit(gate_up.data[i].to(torch.float32), quant_type='nf4')
+                qw, qs = bnb_F.quantize_4bit(gate_up.data[i].to(device=quant_device, dtype=torch.float32), quant_type='nf4')
                 qs.shape = torch.Size(qs.shape)  # Fix bnb 0.46 shape bug
-                gate_up_qdata.append(qw)
+                gate_up_qdata.append(qw.cpu())
                 gate_up_qstates.append(qs)
 
-                qw, qs = bnb_F.quantize_4bit(down.data[i].to(torch.float32), quant_type='nf4')
+                qw, qs = bnb_F.quantize_4bit(down.data[i].to(device=quant_device, dtype=torch.float32), quant_type='nf4')
                 qs.shape = torch.Size(qs.shape)
-                down_qdata.append(qw)
+                down_qdata.append(qw.cpu())
                 down_qstates.append(qs)
+
+                # Move quant_state tensors back to CPU to free GPU
+                qs.absmax = qs.absmax.cpu()
+                if qs.code is not None:
+                    qs.code = qs.code.cpu()
+                if qs.state2 is not None:
+                    qs.state2.absmax = qs.state2.absmax.cpu()
+                gate_up_qstates[-1].absmax = gate_up_qstates[-1].absmax.cpu()
+
+            if quant_device != 'cpu':
+                torch.cuda.empty_cache()
 
         quantized = QuantizedMoeExperts(
             num_experts, hidden_dim, intermediate_dim, act_fn,
