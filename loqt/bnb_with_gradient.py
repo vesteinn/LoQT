@@ -151,10 +151,11 @@ class MatMul4BitGradientWithGrad(torch.autograd.Function):
         if require_grad_W:
             #print(f"grad_output shape: {grad_output.shape}, dim: {grad_output.dim()}")
             #check if weight_grad has correct shape, otherwise create it
+            # Gradient dL/dW = grad_output.T @ A, shape [out_features, in_features]
             if grad_output.dim() == 3:
-                weight_grad.data += torch.einsum('bji,bjk->ki', grad_output, A).t().to(weight_grad.device)
+                weight_grad.data += torch.einsum('bji,bjk->ik', grad_output, A).to(weight_grad.device)
             else:
-                weight_grad.data += torch.matmul(grad_output.t(), A).t().to(weight_grad.device)
+                weight_grad.data += torch.matmul(grad_output.t(), A).to(weight_grad.device)
             if torch.all(weight_grad == 0):
                 print("weight_grad is zero in backward")
         if req_gradA:

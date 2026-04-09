@@ -11,10 +11,10 @@ import bitsandbytes as bnb
 from optimizers import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor
 from peft_pretraining import training_utils
 
-def classify_galore_parameters(model):
+def classify_galore_parameters(model, target_modules=None):
     """Classify parameters for GaLore optimizer based on module names."""
     galore_params = []
-    target_modules_list = ["attn", "mlp"]
+    target_modules_list = target_modules if target_modules is not None else ["attn", "mlp"]
     for module_name, module in model.named_modules():
         if not isinstance(module, nn.Linear):
             continue

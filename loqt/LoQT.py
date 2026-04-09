@@ -17,6 +17,21 @@ from typing import Dict, Callable
 import time
 
 
+def _fix_qs_shape(quant_state):
+    """Fix bitsandbytes >=0.46 bug: quant_state.shape stored as list fails
+    comparison with torch.Size in dequantize_4bit. Convert to torch.Size."""
+    if hasattr(quant_state, 'shape') and not isinstance(quant_state.shape, torch.Size):
+        quant_state.shape = torch.Size(quant_state.shape)
+
+
+# Monkey-patch bnb_F.dequantize_4bit to fix shape before each call
+_orig_dequantize_4bit = bnb_F.dequantize_4bit
+def _patched_dequantize_4bit(A, quant_state, *args, **kwargs):
+    _fix_qs_shape(quant_state)
+    return _orig_dequantize_4bit(A, quant_state, *args, **kwargs)
+bnb_F.dequantize_4bit = _patched_dequantize_4bit
+
+
 # Global variable to store the cumulative time for merge operations
 cumulative_merge_time = 0.0
 
@@ -130,9 +145,17 @@ class LoQTModel(nn.Module):
         target_modules_list = self.target_modules if isinstance(self.target_modules, list) else [self.target_modules]
         for module_name, module in self.wrapped_model.named_modules():
             if isinstance(module, nn.Linear) and any(target in module_name for target in target_modules_list):
+                # Adaptive rank: cap at half the smaller dimension
+                min_dim = min(module.in_features, module.out_features)
+                effective_r = min(self.r, max(1, min_dim // 2))
+                if min_dim < 2:
+                    print(f"Skipping {module_name}: min_dim={min_dim} too small")
+                    continue
+                if effective_r != self.r:
+                    print(f"Adapting rank for {module_name}: {self.r} -> {effective_r} (min_dim={min_dim})")
                 new_module = LoraLinear(
                     module,
-                    r=self.r,
+                    r=effective_r,
                     lora_alpha=self.lora_alpha,
                     proj_type=self.proj_type,
                     device=self.device,
@@ -280,6 +303,15 @@ class LoQTModel(nn.Module):
         return new_model
     
 
+    @staticmethod
+    def _fix_quant_state_shapes(module):
+        """Fix bitsandbytes >=0.46 bug: quant_state stores shape as list but
+        dequantize_4bit compares with torch.Size. Convert all to torch.Size."""
+        for param in module.parameters():
+            if hasattr(param, 'quant_state') and hasattr(param.quant_state, 'shape'):
+                if not isinstance(param.quant_state.shape, torch.Size):
+                    param.quant_state.shape = torch.Size(param.quant_state.shape)
+
     def to(self, *args, **kwargs):
         print(f"Calling to() on {self.__class__.__name__}")
         super().to(*args, **kwargs)
@@ -289,7 +321,10 @@ class LoQTModel(nn.Module):
         for module in self.modules():
             if isinstance(module, LoraLinear):
                 module.to(device)
-        
+
+        # Fix quant_state shape types after device transfer
+        self._fix_quant_state_shapes(self)
+
         return self
 
     @classmethod
@@ -506,15 +541,20 @@ class LoraLinear(nn.Module):
             return W
 
         elif quantize=="4bit":
-            linear_q = LinearNF4WithGradient(W.in_features, W.out_features, bias=use_bias, compress_statistics=use_double_quant)            
-            W = W.to('cpu') # Without this, the weight is not quantized if it was already quantise before             
+            linear_q = LinearNF4WithGradient(W.in_features, W.out_features, bias=use_bias, compress_statistics=use_double_quant)
+            W = W.to('cpu') # Without this, the weight is not quantized if it was already quantise before
             new_weight = bnb.nn.Params4bit(data=W.weight, quant_type=bnb_4bit_quant, requires_grad=False)
             linear_q.weight = new_weight
             linear_q.grad_offloading = self.use_offloading
             linear_q.weight_grad = torch.tensor(0, device=self.offload_device, requires_grad=False)
             if use_bias:
                 linear_q.bias = nn.Parameter(W.bias.data, requires_grad=True)
-            return linear_q.to(self.device)
+            linear_q = linear_q.to(self.device)
+            # Fix bitsandbytes >=0.46 shape comparison bug: quant_state stores shape
+            # as list but dequantize_4bit compares with torch.Size
+            if hasattr(linear_q.weight, 'quant_state') and hasattr(linear_q.weight.quant_state, 'shape'):
+                linear_q.weight.quant_state.shape = torch.Size(linear_q.weight.quant_state.shape)
+            return linear_q
             
         else:
             raise ValueError("quantize must be None, or '4bit'")
@@ -679,6 +719,7 @@ class LoraLinear(nn.Module):
                 self.full_precision_W = new_W.data.detach().clone().to(self.offload_device)
                     
                 self.W.weight.data, self.W.weight.quant_state = bnb_F.quantize_4bit(new_W, quant_type=self.bnb_4bit_quant_type)
+                self.W.weight.quant_state.shape = torch.Size(self.W.weight.quant_state.shape)
                 del new_W
                 del W_deq
                 

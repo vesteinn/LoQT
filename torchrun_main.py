@@ -32,6 +32,7 @@ from loqt.LoQT import LoQTModel
 from loqt.utils import get_model, get_proj_update_steps, broadcast_parameters, load_model_from_checkpoint
 from loqt.optimizer_utils import create_optimizer, setup_layerwise_optimizer, classify_galore_parameters
 from loqt.memory_utils import get_gpu_metrics_nvitop, log_memory_usage
+from loqt.moe_utils import unfuse_moe_experts, quantize_frozen_experts
 
 transformers.logging.set_verbosity_error()
 
@@ -43,7 +44,8 @@ def parse_args(args):
     parser.add_argument("--model_config", type=str, default=None)
     parser.add_argument("--model_name", type=str, default=None)
     parser.add_argument("--dataset_name", type=str, default=None)
-    parser.add_argument("--use_hf_model", default=False, action="store_true")
+    parser.add_argument("--use_hf_model", default=True, type=lambda x: x.lower() == "true",
+                        help="Use HuggingFace AutoModelForCausalLM (default: True). Set to false for custom LlamaForCausalLM.")
     parser.add_argument("--continue_from", type=str, default=None)
     parser.add_argument("--eval_at_continue_from",  default=True, type=lambda x: x.lower() == "true", help='Perform evaluation just after loading')
     parser.add_argument("--skip_batches_in_continue_from", default=False, type=lambda x: x.lower() == "true")
@@ -105,6 +107,12 @@ def parse_args(args):
     parser.add_argument('--increment_size', type=float, default=1.2, help="The factor for increasing warmup steps either the linear steps or the exponential factor")
     parser.add_argument('--max_proj_gap', type=float, default=0)
     parser.add_argument("--use_eigenh_for_projection", default=False, type=lambda x: x.lower() == "true", help="If false, use SVD for projection")
+    parser.add_argument("--target_modules", type=str, nargs="+", default=["attn", "attention", "mlp"],
+                        help="Substring patterns for module names to wrap with LoQT adapters (default: attn attention mlp)")
+    parser.add_argument("--unfuse_moe_experts", default=False, type=lambda x: x.lower() == "true",
+                        help="Unfuse MoE expert 3D Parameters into individual nn.Linear layers for LoQT wrapping")
+    parser.add_argument("--quantize_frozen_experts", default=False, type=lambda x: x.lower() == "true",
+                        help="Quantize MoE expert weights to NF4 (frozen, not trained) for memory savings")
 
     # Quantization Parameters
     parser.add_argument("--quantize_w", type=str, default=None, choices=["1bit", "4bit", "8bit"])
@@ -150,6 +158,9 @@ def load_model(args, cache_dir):
             return {'cache_dir': cache_dir}
         return {}
 
+    # Determine dtype for loading
+    load_dtype = torch.bfloat16 if args.dtype in ["bf16", "bfloat16"] else None
+
     if args.model_config is not None:
         model_config = AutoConfig.from_pretrained(args.model_config, **get_pretrained_kwargs())
         if args.use_hf_model:
@@ -158,7 +169,8 @@ def load_model(args, cache_dir):
             model = LlamaForCausalLM(model_config)
     elif args.model_name is not None:
         if args.use_hf_model:
-            model = AutoModelForCausalLM.from_pretrained(args.model_name, **get_pretrained_kwargs())
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name, torch_dtype=load_dtype, trust_remote_code=True, **get_pretrained_kwargs())
         else:
             model = LlamaForCausalLM.from_pretrained(args.model_name, **get_pretrained_kwargs())
         model_config = model.config
@@ -182,12 +194,10 @@ def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, 
     if not args.single_gpu:
         val_data = datasets.distributed.split_dataset_by_node(val_data, rank=global_rank, world_size=world_size)
 
-    # C4 values
-    remove_columns = ["text", "timestamp", "url"]
-    if is_icelandic_dataset:
-        # Hard coded for the icelandic dataset
-        remove_columns = ['prefix', 'source', 'target', 'origin', 'text']
-    
+    # Dynamically determine columns to remove (keep only model input columns)
+    sample = next(iter(val_data))
+    remove_columns = [c for c in sample.keys() if c not in ("input_ids", "attention_mask", "labels")]
+
     val_data_mapped = val_data.map(
         preprocess_batched,
         batched=True,
@@ -374,14 +384,21 @@ def main(args):
         eval_dataset = None
     # check if folder exists
     elif os.path.exists(args.dataset_name):
-        data = datasets.load_dataset(args.dataset_name, split="train", streaming=False)
-        eval_dataset = datasets.load_dataset(args.dataset_name, split="validation[:5%]")
+        # Support both save_to_disk (Arrow) and regular dataset formats
+        try:
+            ds = datasets.load_from_disk(args.dataset_name)
+            data = ds["train"]
+            eval_dataset = ds["validation"]
+        except Exception:
+            data = datasets.load_dataset(args.dataset_name, split="train", streaming=False)
+            eval_dataset = datasets.load_dataset(args.dataset_name, split="validation[:5%]")
         if "text" not in data.column_names:
             data = data.map(lambda x: {"text": x["source"]})
             eval_dataset = eval_dataset.map(lambda x: {"text": x["source"]})
     else:
-        data = datasets.load_dataset(args.dataset_name, split="train", streaming=True)
-        eval_dataset = datasets.load_dataset(args.dataset_name, split="validation[:5%]")
+        hf_token = os.environ.get("HF_TOKEN", True)
+        data = datasets.load_dataset(args.dataset_name, split="train", streaming=True, token=hf_token, trust_remote_code=True)
+        eval_dataset = datasets.load_dataset(args.dataset_name, split="validation[:5%]", token=hf_token, trust_remote_code=True)
     
     logger.info(f"Shuffling data with seed {args.seed}")
     data: datasets.Dataset = data.shuffle(seed=args.seed)
@@ -427,15 +444,36 @@ def main(args):
         
     update_steps = get_proj_update_steps(args)
     print(f"Projection update steps: {update_steps}")
-    
-        
+
+    if args.unfuse_moe_experts:
+        logger.info("Unfusing MoE expert weights into individual nn.Linear layers")
+        model = unfuse_moe_experts(model)
+
+    if args.quantize_frozen_experts:
+        cache_path = os.environ.get("QUANTIZED_MODEL_PATH", None)
+        if not cache_path:
+            cache_path = os.path.join(args.save_dir, "quantized_model.pt") if args.save_dir else None
+        if cache_path and os.path.exists(cache_path):
+            logger.info(f"Loading pre-quantized model from {cache_path}")
+            model = torch.load(cache_path, map_location='cpu', weights_only=False)
+            model_config = model.config
+        else:
+            logger.info("Quantizing frozen MoE expert weights to NF4")
+            model = quantize_frozen_experts(model)
+            if cache_path:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                logger.info(f"Saving pre-quantized model to {cache_path}")
+                torch.save(model, cache_path)
+                logger.info("Saved.")
+
     if args.use_loqt and not args.continue_from:
         logger.info(f"Wrapping model with LoQT")
+        import gc; gc.collect()  # Free any unreferenced tensors before wrapping
         model = LoQTModel(
             model, 
             r=args.rank,
             lora_alpha=args.lora_alpha,
-            target_modules=["attn", "attention", "mlp"],
+            target_modules=args.target_modules,
             quantize_w=args.quantize_w,
             use_double_quant=args.use_double_quant, 
             device=device,
@@ -454,7 +492,12 @@ def main(args):
             grad_accumulation_steps = args.gradient_accumulation
         )
         if args.only_train_lora:
-            args.use_loqt=False # make sure not to update weights 
+            args.use_loqt=False # make sure not to update weights
+
+    # Free CPU memory from model loading — weights are now quantized on GPU
+    import gc; gc.collect()
+    torch.cuda.empty_cache()
+    logger.info(f"Post-wrap CPU RSS: {__import__('resource').getrusage(__import__('resource').RUSAGE_SELF).ru_maxrss / 1024:.0f} MB")
 
     global_step = 0
     update_step = 0
@@ -476,11 +519,13 @@ def main(args):
             logger.info(f"Eval loss at step {update_step}: {total_loss}, perplexity: {perplexity}")
     
     if args.activation_checkpointing:
-        model.gradient_checkpointing_enable()
+        inner = model.wrapped_model if hasattr(model, 'wrapped_model') else model
+        inner.gradient_checkpointing_enable()
 
     if args.dtype in ["bf16", "bfloat16"]:
-        model = model.to(device=device, dtype=torch.bfloat16)
-        # torch.set_default_dtype(torch.bfloat16)
+        # Move to device only — dtype was set at load time.
+        # Using dtype= here would dequantize NF4 weights back to bf16.
+        model = model.to(device=device)
         print("Model precision: ", model.parameters().__next__().dtype)
     else:
         model = model.to(device=device)
@@ -521,7 +566,7 @@ def main(args):
     
     # GaLore-specific parameter classification and logging
     if 'galore' in args.optimizer.lower():
-        regular_params, galore_params = classify_galore_parameters(model)
+        regular_params, galore_params = classify_galore_parameters(model, target_modules=args.target_modules)
         logger.info(f"Total params with GaLore enabled: {sum(p.numel() for p in galore_params) / 1_000_000:.2f}M")
 
         param_groups = [
@@ -597,7 +642,7 @@ def main(args):
         )
 
     if not args.single_gpu:
-        model: LlamaForCausalLM = torch.nn.parallel.DistributedDataParallel(
+        model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
