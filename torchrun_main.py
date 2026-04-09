@@ -424,8 +424,10 @@ def main(args):
         if args.use_chat_template:
             texts = [
                 tokenizer.apply_chat_template(
-                    [{"role": "assistant", "content": t}],
-                    tokenize=False, add_generation_prompt=False
+                    [{"role": "user", "content": "Haltu áfram."},
+                     {"role": "assistant", "content": t}],
+                    tokenize=False, add_generation_prompt=False,
+                    enable_thinking=False,
                 ) for t in texts
             ]
         batch = tokenizer(
@@ -923,7 +925,30 @@ def save_checkpoint(model, optimizer, scheduler, update_step, global_step, run_c
 def load_checkpoint(model, args, logger, device):
     logger.info(f"Loading model from {args.continue_from}")
     if args.use_loqt:
-        model = LoQTModel.from_pretrained(args.continue_from, device, saved_as_full_model=args.save_original_model)
+        result = LoQTModel.from_pretrained(args.continue_from, device, saved_as_full_model=args.save_original_model)
+        if isinstance(result, dict):
+            # state_dict format — need to wrap model with LoQT first, then load weights
+            logger.info("Loading state_dict into LoQT model...")
+            with open(os.path.join(args.continue_from, "loqt_config.json")) as f:
+                cfg = json.load(f)
+            update_steps = get_proj_update_steps(args)
+            model = LoQTModel(
+                model, r=cfg['r'], lora_alpha=cfg['lora_alpha'],
+                target_modules=cfg['target_modules'],
+                quantize_w=cfg.get('quantize_w'), use_double_quant=cfg.get('use_double_quant', False),
+                device=device, proj_type=cfg.get('proj_type', 'std'),
+                compute_dtype=torch.bfloat16 if args.dtype == "bfloat16" else torch.float32,
+                quantize_projection_matrix=cfg.get('quantize_projection_matrix'),
+                compensate_quant_error_iterations=cfg.get('compensate_quant_error_iterations', 0),
+                use_offloading=args.use_offloading, is_single_gpu=args.single_gpu,
+                model_config={}, use_eigenh_for_projection=args.use_eigenh_for_projection,
+                init_lora_AB_as_random_and_zeros=args.init_lora_AB_as_random_and_zeros,
+                train_projection_matrix=args.train_projection_matrix,
+                only_train_lora=args.only_train_lora,
+                update_steps=update_steps, grad_accumulation_steps=args.gradient_accumulation)
+            model.load_state_dict(result, strict=False)
+        else:
+            model = result
     else:
         model = load_model_from_checkpoint(args.continue_from, model)
 

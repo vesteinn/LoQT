@@ -248,7 +248,9 @@ class LoQTModel(nn.Module):
             model_to_save = self.return_original_model()
             torch.save(model_to_save, os.path.join(path, "original_model.pth"))
         if not only_save_original_model:
-            torch.save(self, os.path.join(path, "pytorch_model_full.pth"))
+            # Save state_dict instead of full object to avoid pickling issues
+            # with HuggingFace hooks (e.g. gradient checkpointing closures)
+            torch.save(self.state_dict(), os.path.join(path, "pytorch_model_full.pth"))
         # Save additional configuration
         with open(os.path.join(path, "loqt_config.json"), "w") as f:
             json.dump(self._config.__dict__, f, indent=4)
@@ -261,7 +263,12 @@ class LoQTModel(nn.Module):
         if saved_as_full_model:
             model2 = torch.load(os.path.join(path, "original_model.pth"), map_location=device)
         else:
-            model2 = torch.load(os.path.join(path, "pytorch_model_full.pth"), map_location=device)
+            state_dict = torch.load(os.path.join(path, "pytorch_model_full.pth"), map_location=device, weights_only=False)
+            # If it's a state_dict (OrderedDict), caller must reconstruct the model and load
+            # If it's a full model object (legacy), return directly
+            if isinstance(state_dict, dict):
+                return state_dict  # Caller loads with model.load_state_dict()
+            model2 = state_dict
         return model2
     
     def return_original_model(self):
