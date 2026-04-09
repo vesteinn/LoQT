@@ -152,19 +152,32 @@ class QuantizedMoeExperts(nn.Module):
         self.gate_up_qs = gate_up_quant_states
         self.down_qs = down_quant_states
 
+    def _move_qs_to(self, device):
+        """Move all quant_state tensors to device."""
+        for qs_list in [self.gate_up_qs, self.down_qs]:
+            for qs in qs_list:
+                qs.absmax = qs.absmax.to(device)
+                if qs.code is not None:
+                    qs.code = qs.code.to(device)
+                if qs.state2 is not None:
+                    qs.state2.absmax = qs.state2.absmax.to(device)
+                    if qs.state2.code is not None:
+                        qs.state2.code = qs.state2.code.to(device)
+
+    def _apply(self, fn, recurse=True):
+        """Override _apply to also move quant_state tensors when model.to() is called."""
+        result = super()._apply(fn, recurse)
+        # Detect target device from the first buffer
+        buf = getattr(self, 'gate_up_qw_0', None)
+        if buf is not None:
+            self._move_qs_to(buf.device)
+        return result
+
     def to(self, *args, **kwargs):
         result = super().to(*args, **kwargs)
         device = args[0] if args and isinstance(args[0], (torch.device, str, int)) else kwargs.get('device', None)
         if device is not None:
-            for qs_list in [self.gate_up_qs, self.down_qs]:
-                for qs in qs_list:
-                    qs.absmax = qs.absmax.to(device)
-                    if qs.code is not None:
-                        qs.code = qs.code.to(device)
-                    if qs.state2 is not None:
-                        qs.state2.absmax = qs.state2.absmax.to(device)
-                        if qs.state2.code is not None:
-                            qs.state2.code = qs.state2.code.to(device)
+            self._move_qs_to(device)
         return result
 
     def _dequant(self, idx, which):
