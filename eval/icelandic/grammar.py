@@ -79,7 +79,7 @@ def load_model(model_name: str, checkpoint: Optional[str] = None, device: str = 
 
 
 def generate_texts(model, tokenizer, prompts: list[str], device: str = 'cuda:0',
-                   max_new_tokens: int = 200) -> list[str]:
+                   max_new_tokens: int = 200, repetition_penalty: float = 1.3) -> list[str]:
     """Generate responses for each prompt."""
     texts = []
     for prompt in prompts:
@@ -88,7 +88,8 @@ def generate_texts(model, tokenizer, prompts: list[str], device: str = 'cuda:0',
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
         inputs = tokenizer([text], return_tensors="pt").to(device)
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+            out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                                repetition_penalty=repetition_penalty)
         response = tokenizer.decode(out[0][len(inputs.input_ids[0]):], skip_special_tokens=True)
         texts.append(response)
     return texts
@@ -140,7 +141,8 @@ def check_grammar(texts: list[str]) -> dict:
 
 
 def evaluate(model_name: str, checkpoint: Optional[str] = None,
-             device: str = 'cuda:0', num_prompts: int = 10) -> dict:
+             device: str = 'cuda:0', num_prompts: int = 10,
+             output_dir: Optional[str] = None) -> dict:
     """Full grammar evaluation pipeline."""
     model, tokenizer = load_model(model_name, checkpoint, device)
     prompts = PROMPTS[:num_prompts]
@@ -150,24 +152,25 @@ def evaluate(model_name: str, checkpoint: Optional[str] = None,
 
     print("Checking grammar...")
     results = check_grammar(texts)
+    results['prompts'] = prompts
+    results['generated_texts'] = texts
+
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        import json
+        label = 'finetuned' if checkpoint else 'base'
+        with open(os.path.join(output_dir, f'grammar_{label}.json'), 'w', encoding='utf-8') as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        # Human-readable outputs
+        with open(os.path.join(output_dir, f'outputs_{label}.txt'), 'w', encoding='utf-8') as f:
+            for prompt, text in zip(prompts, texts):
+                f.write(f">>> {prompt}\n{text}\n\n")
+        print(f"  Saved to {output_dir}/")
 
     return results
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='Qwen/Qwen3.5-4B')
-    parser.add_argument('--checkpoint', type=str, default=None)
-    parser.add_argument('--device', type=str, default='cuda:0')
-    parser.add_argument('--num_prompts', type=int, default=10)
-    args = parser.parse_args()
-
-    print(f"Model: {args.model}")
-    print(f"Checkpoint: {args.checkpoint or 'None (base)'}")
-    print()
-
-    results = evaluate(args.model, args.checkpoint, args.device, args.num_prompts)
-
+def print_results(results: dict):
     print(f"\n{'='*50}")
     print(f"Grammar Evaluation Results")
     print(f"{'='*50}")
@@ -178,8 +181,26 @@ if __name__ == '__main__':
     print(f"\n  Top error types:")
     for code, count in list(results['error_types'].items())[:10]:
         print(f"    {code}: {count}")
-    if results['sample_errors']:
+    if results.get('sample_errors'):
         print(f"\n  Sample errors:")
         for err in results['sample_errors'][:3]:
             print(f"    [{err['code']}] \"{err['text']}\" -> \"{err['suggest']}\"")
     print(f"{'='*50}")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default='Qwen/Qwen3.5-4B')
+    parser.add_argument('--checkpoint', type=str, default=None)
+    parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--num_prompts', type=int, default=10)
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='Directory to save generated outputs and results JSON')
+    args = parser.parse_args()
+
+    print(f"Model: {args.model}")
+    print(f"Checkpoint: {args.checkpoint or 'None (base)'}")
+    print()
+
+    results = evaluate(args.model, args.checkpoint, args.device, args.num_prompts, args.output_dir)
+    print_results(results)
