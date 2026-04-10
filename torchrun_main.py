@@ -612,6 +612,12 @@ def main(args):
             logger.info(f"Will train for {args.num_training_steps - update_step} update steps")
             
             skip_batches = update_step * args.gradient_accumulation
+
+            # Reshuffle data with a different seed to avoid repeating the same batches
+            new_seed = args.seed + update_step
+            logger.info(f"Reshuffling data with seed {new_seed} (base {args.seed} + step {update_step})")
+            data = data.shuffle(seed=new_seed)
+
             del _old_state
 
         else:
