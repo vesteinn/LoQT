@@ -25,8 +25,8 @@ PYTHONUNBUFFERED=1 python3 -m torch.distributed.run --standalone --nproc_per_nod
     --rank 64 \
     --lora_alpha 0.5 \
     --update_proj_gap 100 \
-    --batch_size 4 \
-    --total_batch_size 64 \
+    --batch_size 1 \
+    --total_batch_size 16 \
     --max_length 2048 \
     --num_training_steps 10000 \
     --warmup_steps 1000 \

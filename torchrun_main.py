@@ -537,7 +537,9 @@ def main(args):
     if args.dtype in ["bf16", "bfloat16"]:
         # Move to device only — dtype was set at load time.
         # Using dtype= here would dequantize NF4 weights back to bf16.
+        print(f"GPU before .to(): {torch.cuda.memory_allocated(device)/1e9:.1f} GB")
         model = model.to(device=device)
+        print(f"GPU after .to(): {torch.cuda.memory_allocated(device)/1e9:.1f} GB")
         print("Model precision: ", model.parameters().__next__().dtype)
     else:
         model = model.to(device=device)
