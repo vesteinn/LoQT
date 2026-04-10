@@ -612,12 +612,7 @@ def main(args):
             logger.info(f"Will train for {args.num_training_steps - update_step} update steps")
             
             skip_batches = update_step * args.gradient_accumulation
-
-            # Reshuffle data with a different seed to avoid repeating the same batches
-            new_seed = args.seed + update_step
-            logger.info(f"Reshuffling data with seed {new_seed} (base {args.seed} + step {update_step})")
-            data = data.shuffle(seed=new_seed)
-
+            logger.info(f"Will skip {skip_batches} batches to resume from correct position")
             del _old_state
 
         else:
@@ -712,7 +707,7 @@ def main(args):
     unique_directory_name = f"loqt_{unique_id}"
 
     for batch_idx, batch in enumerate(dataloader):
-        if batch_idx < skip_batches and args.skip_batches_in_continue_from: 
+        if batch_idx < skip_batches: 
             continue
  
         global_step += 1
